@@ -30,7 +30,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------- LOAD ---------------- #
-df = pd.read_csv("processed_data.csv")
+df = pd.read_csv("data.csv")
 model = pickle.load(open("model.pkl", "rb"))
 df["full_date"] = pd.to_datetime(df["full_date"])
 
