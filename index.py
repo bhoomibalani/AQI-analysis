@@ -50,48 +50,92 @@
 # - Improved prediction using lag features
 # - Visualized feature importance for interpretability
 
-import pandas as pd
+import glob
+import os
 import pickle
-from xgboost import XGBRegressor
 
-# ---------------- LOAD DATA ---------------- #
-df = pd.read_csv("final_dataset.csv")
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
-# ---------------- CREATE DATE ---------------- #
-df["full_date"] = pd.to_datetime({
-    "year": df["Year"],
-    "month": df["Month"],
-    "day": df["Date"]
-})
 
-# Sort by date (important)
-df = df.sort_values(by="full_date")
+def load_area_wise_data():
+    month_to_num = {
+        "January": 1, "February": 2, "March": 3, "April": 4,
+        "May": 5, "June": 6, "July": 7, "August": 8,
+        "September": 9, "October": 10, "November": 11, "December": 12,
+    }
+    files = glob.glob("AQI_daily_2024_*_Delhi_*.xlsx")
+    if not files:
+        raise FileNotFoundError("No area-wise Delhi AQI Excel files found.")
 
-# ---------------- ADD WEATHER FEATURES ---------------- #
-# (Dummy values for training — real values will come from API in app)
-df["Temperature"] = 25
-df["Humidity"] = 60
-df["WindSpeed"] = 5
+    frames = []
+    for file_path in files:
+        base = os.path.basename(file_path)
+        area = base.replace("AQI_daily_2024_", "")
+        area = area.split("_Delhi_")[0].replace("_", " ").strip()
 
-# ---------------- FEATURE SELECTION ---------------- #
-X = df.drop(columns=["AQI", "full_date"])
-y = df["AQI"]
+        wide = pd.read_excel(file_path)
+        long_df = wide.melt(id_vars="Day", var_name="MonthName", value_name="AQI")
+        long_df["Month"] = long_df["MonthName"].map(month_to_num)
+        long_df["Year"] = 2024
+        long_df["Area"] = area
+        long_df["Date"] = long_df["Day"]
+        long_df["full_date"] = pd.to_datetime(
+            {"year": long_df["Year"], "month": long_df["Month"], "day": long_df["Date"]},
+            errors="coerce",
+        )
+        frames.append(long_df)
 
-# ---------------- TRAIN MODEL ---------------- #
-model = XGBRegressor(
-    n_estimators=200,
-    learning_rate=0.05,
-    max_depth=5
-)
+    df = pd.concat(frames, ignore_index=True)
+    df["AQI"] = pd.to_numeric(df["AQI"], errors="coerce")
+    df = df.dropna(subset=["AQI", "full_date"])
+    df["Days"] = df["full_date"].dt.weekday
+    df["Holidays_Count"] = 0
+    return df.sort_values("full_date")
 
-model.fit(X, y)
 
-# ---------------- SAVE MODEL ---------------- #
-with open("model.pkl", "wb") as f:
-    pickle.dump(model, f)
+def train_and_save():
+    df = load_area_wise_data()
 
-# ---------------- SAVE PROCESSED DATA ---------------- #
-df.to_csv("data.csv", index=False)
+    feature_cols = ["Date", "Month", "Year", "Days", "Holidays_Count", "Area"]
+    target_col = "AQI"
 
-print("✅ Model trained successfully!")
-print("✅ Files saved: model.pkl, data.csv")
+    X = df[feature_cols]
+    y = df[target_col]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("area_ohe", OneHotEncoder(handle_unknown="ignore"), ["Area"]),
+            ("num", "passthrough", ["Date", "Month", "Year", "Days", "Holidays_Count"]),
+        ]
+    )
+
+    model = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("regressor", RandomForestRegressor(n_estimators=300, random_state=42)),
+        ]
+    )
+
+    model.fit(X, y)
+
+    with open("model.pkl", "wb") as f:
+        pickle.dump(model, f)
+
+    # Keep this output compatible with app charts.
+    output = df[
+        ["Date", "Month", "Year", "Holidays_Count", "Days", "Area", "AQI", "full_date"]
+    ].copy()
+    output.to_csv("data.csv", index=False)
+
+    print("Model trained on area-wise Delhi data.")
+    print(f"Rows used: {len(df)}")
+    print(f"Areas used: {df['Area'].nunique()}")
+    print("Saved: model.pkl, data.csv")
+
+
+if __name__ == "__main__":
+    train_and_save()
